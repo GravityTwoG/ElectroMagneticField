@@ -17,17 +17,28 @@ const GLint WINDOW_HEIGHT = 640;
 /* charge constants */
 __constant__ const float K = 20.0f;
 __constant__ float MIN_DISTANCE = 0.1f; // not to divide by zero
-__constant__ const float maxSolidColorLength = 1.0f;
+__constant__ const float MAX_SOLID_COLOR = 1.0f;
 
 const int MAX_CHARGE = 100;
 const int MIN_CHARGE = -100;
-
+const int MIN_CHARGE_ABS = 5;
 const char MAX_CHARGE_COUNT = 30;
+
 char chargeCount = 0;
 __constant__ char dev_chargeCount;
 
-float3 charges[MAX_CHARGE_COUNT]; // x, y, z == m
-__constant__ float3 dev_charges[MAX_CHARGE_COUNT]; // x, y, z == m
+struct Particle {
+	float x;
+	float y;
+	float dx;
+	float dy;
+	float charge;
+	float mass;
+	bool isPhysical;
+};
+
+Particle charges[MAX_CHARGE_COUNT]; 
+__constant__ Particle dev_charges[MAX_CHARGE_COUNT]; 
 
 /* OpenGL interoperability */
 dim3 blocks, threads;
@@ -60,34 +71,76 @@ __device__ float length(const float2& q) {
 }
 
 __device__ float length2(const float2& q) {
-	return (q.x * q.x + q.y * q.y);
+	return q.x * q.x + q.y * q.y;
 }
 
+// apply ode
+__global__ void dev_moveCharge(uchar4* screen) {
+	int charge_i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (charge_i >= MAX_CHARGE_COUNT) return;
+
+	Particle& currentParticle = dev_charges[charge_i];
+
+	if (!currentParticle.isPhysical) return;
+	if (currentParticle.x > 10 * WINDOW_WIDTH) return;
+	if (currentParticle.x < -10 * WINDOW_WIDTH) return;
+	if (currentParticle.y > 10 * WINDOW_HEIGHT) return;
+	if (currentParticle.y < -10 * WINDOW_HEIGHT) return;
+
+	float2 force;
+	force.x = force.y = 0.0f;
+
+	// iterate over all charges and compute resulted force vector
+	float2 t_force;
+	for (char i = 0; i < dev_chargeCount; i++) {
+		const Particle& particle = dev_charges[i];
+		t_force.x = currentParticle.x - particle.x;
+		t_force.y = currentParticle.y - particle.y;
+
+		float l = length2(t_force) + MIN_DISTANCE;
+		float e = particle.charge / sqrt(l * l * l);
+		float maxE = 5000.0;
+		if (e > maxE) e = maxE;
+		if (e < -maxE) e = -maxE;
+		t_force.x *= e;
+		t_force.y *= e;
+
+		force.x += t_force.x;
+		force.y += t_force.y;
+	}
+
+	float localK = currentParticle.charge / currentParticle.mass;
+	force.x *= localK;
+	force.y *= localK;
+
+	currentParticle.x += force.x;
+	currentParticle.y += force.y;
+}
 
 __global__ void dev_renderFrame(uchar4* screen) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 	if (x >= WINDOW_WIDTH || y >= WINDOW_HEIGHT) return;
 
-	float2 force, t_force;
+	float2 force;
 	force.x = force.y = 0.0f;
 
 	float E = 0;
+	float2 t_force;
 	// iterate over all charges and compute resulted force vector
 	for (char i = 0; i < dev_chargeCount; i++) {
-		const float3& charge = dev_charges[i];
-		float2& f = t_force;
+		const Particle& particle = dev_charges[i];
+		t_force.x = x - particle.x; // dx
+		t_force.y = y - particle.y; // dy
 
-		f.x = x - charge.x;
-		f.y = y - charge.y;
+		// x^2 + y^2
+		float lengthSquared = length2(t_force) + MIN_DISTANCE;
 
-		float l = length2(f) + MIN_DISTANCE;
-
-		// 
-		float e = charge.z / sqrt(l * l * l);
+		//e = q / (x^2 + y^2)^(3/2)
+		float e = particle.charge / sqrtf(lengthSquared * lengthSquared * lengthSquared);
 		E += e;
-		f.x *= e;
-		f.y *= e;
+		t_force.x *= e;
+		t_force.y *= e;
 
 		force.x += t_force.x;
 		force.y += t_force.y;
@@ -103,9 +156,9 @@ __global__ void dev_renderFrame(uchar4* screen) {
 	float l = length(force); // 
 
 	if (E >= 0.0) {
-		pixel.x = (l > maxSolidColorLength ? 255 : l * 256 / maxSolidColorLength);
+		pixel.x = (l > MAX_SOLID_COLOR ? 255 : l * 256 / MAX_SOLID_COLOR);
 	} else {
-		pixel.z = (l > maxSolidColorLength ? 255 : l * 256 / maxSolidColorLength);
+		pixel.z = (l > MAX_SOLID_COLOR ? 255 : l * 256 / MAX_SOLID_COLOR);
 	}
 }
 
@@ -127,6 +180,7 @@ void idle(void) {
 	HANDLE_ERROR(cudaEventRecord(startEvent, 0));
 
 	// Render Image
+	dev_moveCharge<<<blocks, threads>>>(dev_screen);
 	dev_renderFrame<<<blocks, threads>>>(dev_screen);
 	HANDLE_ERROR(cudaDeviceSynchronize());
 
@@ -176,22 +230,29 @@ void addCharge(int x, int y) {
 
 	charges[chargeCount - 1].x = x;
 	charges[chargeCount - 1].y = y;
-	charges[chargeCount - 1].z = MIN_CHARGE + rand() % (MAX_CHARGE - MIN_CHARGE);
+	float newCharge = MIN_CHARGE + rand() % (MAX_CHARGE - MIN_CHARGE);
+	if (newCharge >= 0 && newCharge < MIN_CHARGE_ABS) {
+		newCharge = MIN_CHARGE_ABS;
+	} else if (newCharge < 0 && newCharge > MIN_CHARGE_ABS) {
+		newCharge = -MIN_CHARGE_ABS;
+	}
+	charges[chargeCount - 1].charge = newCharge;
+	charges[chargeCount - 1].mass = fabs(newCharge / 10.0);
+	charges[chargeCount - 1].isPhysical = true;
 
 	printf(
 		"Debug: Charge #%d (%.0f, %.0f, %.0f)\n", chargeCount - 1,
 		charges[chargeCount - 1].x, charges[chargeCount - 1].y,
-		charges[chargeCount - 1].z
+		charges[chargeCount - 1].charge
 	);
+	printf("Charges %d\n", chargeCount);
 
 	HANDLE_ERROR(
-		cudaMemcpyToSymbol(dev_charges, charges, chargeCount * sizeof(float3))
+		cudaMemcpyToSymbol(dev_charges, charges, chargeCount * sizeof(Particle))
 	);
 	HANDLE_ERROR(
 		cudaMemcpyToSymbol(dev_chargeCount, &chargeCount, sizeof(chargeCount))
 	);
-	printf("Charges %d\n", chargeCount);
-	printf("Charge: %f\n", charges[chargeCount - 1].z);
 }
 
 
@@ -201,13 +262,19 @@ void onMouseEvent(int button, int state, int x, int y) {
 	// Drag, start dragging
 	if (state == GLUT_DOWN && selectedChargeIndex != -1) {
 		isDragging = true;
-		printf("Drag charge #%d... ", selectedChargeIndex);
+		printf(
+			"Drag particle #%d with charge %.2f... ", 
+			selectedChargeIndex, 
+			charges[selectedChargeIndex].charge
+		);
+		charges[selectedChargeIndex].isPhysical = false;
 		return;
 	}
 	
 	if (state == GLUT_UP) {
 		if (selectedChargeIndex != -1) { // Drop, stop dragging
 			isDragging = false;
+			charges[selectedChargeIndex].isPhysical = true;
 			printf("Drop\n");
 		} else {
 			addCharge(x, WINDOW_HEIGHT - y);
@@ -217,12 +284,12 @@ void onMouseEvent(int button, int state, int x, int y) {
 
 void onMouseMove(int x, int y) {
 	if (isDragging && selectedChargeIndex != -1) {
-		printf(" drag... \n");
+		//printf(" drag... \n");
 		charges[selectedChargeIndex].x = x;
 		charges[selectedChargeIndex].y = WINDOW_HEIGHT - y;
 
 		HANDLE_ERROR(
-			cudaMemcpyToSymbol(dev_charges, charges, chargeCount * sizeof(float3))
+			cudaMemcpyToSymbol(dev_charges, charges, chargeCount * sizeof(Particle))
 		);
 	}
 }
@@ -230,6 +297,10 @@ void onMouseMove(int x, int y) {
 // Detect selected charge
 void mouseTrack(int x, int y) {
 	if (isDragging) return;
+
+	//HANDLE_ERROR(
+	//	cudaMemcpy(charges, dev_charges, chargeCount * sizeof(Particle), cudaMemcpyDefault)
+	//);
 
 	int dx = 0, dy = 0;
 
@@ -248,8 +319,6 @@ void mouseTrack(int x, int y) {
 }
 
 void initCuda(int deviceId) {
-	HANDLE_ERROR(cudaGLSetGLDevice(deviceId));
-
 	cudaDeviceProp properties;
 	HANDLE_ERROR(cudaGetDeviceProperties(&properties, deviceId));
 
