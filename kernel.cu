@@ -82,10 +82,6 @@ __global__ void dev_moveCharge(uchar4* screen) {
 	Particle& currentParticle = dev_charges[charge_i];
 
 	if (!currentParticle.isPhysical) return;
-	if (currentParticle.x > 10 * WINDOW_WIDTH) return;
-	if (currentParticle.x < -10 * WINDOW_WIDTH) return;
-	if (currentParticle.y > 10 * WINDOW_HEIGHT) return;
-	if (currentParticle.y < -10 * WINDOW_HEIGHT) return;
 
 	float2 force;
 	force.x = force.y = 0.0f;
@@ -108,13 +104,20 @@ __global__ void dev_moveCharge(uchar4* screen) {
 		force.x += t_force.x;
 		force.y += t_force.y;
 	}
+	__syncthreads();
 
 	float localK = currentParticle.charge / currentParticle.mass;
 	force.x *= localK;
 	force.y *= localK;
 
+
 	currentParticle.x += force.x;
 	currentParticle.y += force.y;
+
+	if (currentParticle.x > WINDOW_WIDTH) currentParticle.x = WINDOW_WIDTH;
+	if (currentParticle.x < 0) currentParticle.x = 0;
+	if (currentParticle.y > WINDOW_HEIGHT) currentParticle.y = WINDOW_HEIGHT;
+	if (currentParticle.y < 0) currentParticle.y = 0;
 }
 
 __global__ void dev_renderFrame(uchar4* screen) {
@@ -237,7 +240,7 @@ void addCharge(int x, int y) {
 		newCharge = -MIN_CHARGE_ABS;
 	}
 	charges[chargeCount - 1].charge = newCharge;
-	charges[chargeCount - 1].mass = fabs(newCharge / 10.0);
+	charges[chargeCount - 1].mass = fabs(newCharge / 20.0);
 	charges[chargeCount - 1].isPhysical = true;
 
 	printf(
@@ -291,6 +294,13 @@ void onMouseMove(int x, int y) {
 		HANDLE_ERROR(
 			cudaMemcpyToSymbol(dev_charges, charges, chargeCount * sizeof(Particle))
 		);
+		//HANDLE_ERROR(
+		//	cudaMemcpy(
+		//		dev_charges + selectedChargeIndex,
+		//		charges + selectedChargeIndex,
+		//		1 * sizeof(Particle),
+		//		cudaMemcpyHostToDevice
+		//));
 	}
 }
 
