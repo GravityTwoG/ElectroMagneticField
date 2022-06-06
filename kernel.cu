@@ -130,49 +130,6 @@ __global__ void dev_applyMagneticField(uchar4* screen, Particle* dev_charges, fl
 	}
 }
 
-// apply Columbus Law
-__global__ void dev_applyElectricField(uchar4* screen, Particle* dev_charges, float dt) {
-	int charge_i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (charge_i >= MAX_CHARGE_COUNT) return;
-
-	Particle& currentParticle = dev_charges[charge_i];
-	if (!currentParticle.isPhysical) return;
-
-	float2 force = { 0.0f, 0.0f };
-	// iterate over all paricles and compute resulted force vector
-	for (char i = 0; i < dev_chargeCount; i++) {
-		const Particle& particle = dev_charges[i];
-		float2 t_force = {
-			currentParticle.x - particle.x,
-			currentParticle.y - particle.y
-		};
-
-		float lengthSquared = length2(t_force) + MIN_DISTANCE;
-		float e = particle.charge / sqrt(lengthSquared * lengthSquared * lengthSquared);
-		t_force.x *= e;
-		t_force.y *= e;
-
-		force.x += t_force.x;
-		force.y += t_force.y;
-	}
-
-	const float localK = K * currentParticle.charge / currentParticle.mass / 1000.0;
-	force.x = force.x * localK * currentParticle.vx;
-	force.y = force.y * localK * currentParticle.vx;
-
-	__syncthreads();
-
-	currentParticle.vx += dt * currentParticle.x;
-	currentParticle.vy += dt * currentParticle.y;
-	currentParticle.x += dt * force.x;
-	currentParticle.y += dt * force.y;
-
-	if (currentParticle.x >= WINDOW_WIDTH) currentParticle.x = WINDOW_WIDTH - 1;
-	if (currentParticle.x < 0) currentParticle.x = 0;
-	if (currentParticle.y >= WINDOW_HEIGHT) currentParticle.y = WINDOW_HEIGHT - 1;
-	if (currentParticle.y < 0) currentParticle.y = 0;
-}
-
 __global__ void dev_clearFrame(uchar4* screen) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -256,11 +213,8 @@ void idle(void) {
 		dev_screen, dev_charges, 
 		elapsedTime / 1000.0 * C / lambda
 	);
-	//dev_applyElectricField<<<1, MAX_CHARGE_COUNT>>>(dev_screen, dev_charges, elapsedTime / 1.0);
 	dev_renderFrame<<<blocks, threads>>>(dev_screen, dev_charges);
 	HANDLE_ERROR(cudaDeviceSynchronize());
-
-
 	HANDLE_ERROR(cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0));
 
 	// Kernel Time measure
