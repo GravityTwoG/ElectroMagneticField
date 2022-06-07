@@ -16,7 +16,7 @@ const GLint WINDOW_WIDTH = 820;
 const GLint WINDOW_HEIGHT = 640;
 const int4 magneticField = { WINDOW_WIDTH / 3, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
 
-__device__ const float starB = -5e-10; // Tsl
+__device__ const float starB = -1e-9; // Tsl
 __device__ const float C = 3e8;      // m/s
 __device__ const float lambda = 1;// m
 __device__ const int4 d_magneticField = { 
@@ -26,16 +26,18 @@ __device__ const int4 d_magneticField = {
 	WINDOW_HEIGHT*10   // y-end
 };
 
-const float starV = 5e4; // m/s
-const float V = starV / C;
+const float TIME_SCALE = 0.1;
+const float starV = 10000; // m/s
+const float V_MIN = 0.5 * starV / C;
+const float V_MAX = starV / C;
 
 /* charge constants */
-__constant__ const float K = 1e20;
+__constant__ const float K = 5e21;
 __constant__ float MIN_DISTANCE = 1.0f; // not to divide by zero
 
-const float MIN_CHARGE = 0.2e-19;
 const float MAX_CHARGE = 1.6e-19;
-const char MAX_CHARGE_COUNT = 30;
+const float MIN_CHARGE = 0.3 * MAX_CHARGE;
+const char MAX_CHARGE_COUNT = 15;
 
 char chargeCount = 0;
 __constant__ char dev_chargeCount;
@@ -57,11 +59,6 @@ Particle* dev_charges;
 dim3 blocks, threads;
 GLuint vbo;
 cudaGraphicsResource* cuda_vbo_resource;
-
-/* charge selection */
-const int DETECT_CHARGE_RANGE = 10;
-int selectedChargeIndex = -1;
-bool isDragging = false;
 
 static void cudaCheckError(cudaError_t err, const char* file, int line);
 #define HANDLE_ERROR( err ) (cudaCheckError( err, __FILE__, __LINE__ ))
@@ -96,6 +93,17 @@ __device__ bool isInMagneticField(float x, float y) {
 	return true;
 }
 
+__device__ inline float4 dF(const Particle& p) {
+	float B = starB * p.charge * lambda / (p.mass * C);
+
+	return {
+		p.vx,
+		p.vy,
+		B * p.vy,
+		-B * p.vx
+	};
+}
+
 // apply Columbus Law
 __global__ void dev_applyMagneticField(uchar4* screen, Particle* dev_charges, float dt) {
 	int charge_i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -104,14 +112,40 @@ __global__ void dev_applyMagneticField(uchar4* screen, Particle* dev_charges, fl
 	Particle& particle = dev_charges[charge_i];
 	if (!particle.isPhysical) return;
 
-	float2 v = { particle.vx, particle.vy };
+	//float4 fi = dF(particle);
+	//particle.x += dt * fi.x; // x + dx
+	//particle.y += dt * fi.y; // y + dy
+	//if (isInMagneticField(particle.x, particle.y)) {
+	//	particle.vx += dt * fi.z;
+	//	particle.vy += dt * fi.w;
+	//}
 
-	particle.x += dt * v.x;
-	particle.y += dt * v.y;
+	Particle p2 = particle;
+	float4 d1 = dF(p2);
+
+	p2.x = particle.x + dt * d1.x / 2;
+	p2.y = particle.y + dt * d1.y / 2;
+	p2.vx = particle.vx + dt * d1.z / 2;
+	p2.vy = particle.vy + dt * d1.w / 2;
+	float4 d2 = dF(p2);
+
+	p2.x = particle.x + dt * d2.x / 2;
+	p2.y = particle.y + dt * d2.y / 2;
+	p2.vx = particle.vx + dt * d2.z / 2;
+	p2.vy = particle.vy + dt * d2.w / 2;
+	float4 d3 = dF(p2);
+	
+	p2.x = particle.x + dt * d3.x;
+	p2.y = particle.y + dt * d3.y;
+	p2.vx = particle.vx + dt * d3.z;
+	p2.vy = particle.vy + dt * d3.w;
+	float4 d4 = dF(p2);
+
+	particle.x += dt / 6 * (d1.x + 2*d2.x + 2*d3.x + d4.x); // x + dx
+	particle.y += dt / 6 * (d1.y + 2*d2.y + 2*d3.y + d4.y); // y + dy
 	if (isInMagneticField(particle.x, particle.y)) {
-		float B = starB * particle.charge * lambda / (particle.mass * C);
-		particle.vx +=  dt * B * v.y;
-		particle.vy += -dt * B * v.x;
+		particle.vx += dt / 6 * (d1.z + 2 * d2.z + 2 * d3.z + d4.z);
+		particle.vy += dt / 6 * (d1.w + 2 * d2.w + 2 * d3.w + d4.w);
 	}
 
 	if (particle.x >= 10 * WINDOW_WIDTH) particle.isPhysical = false;
@@ -126,7 +160,7 @@ __global__ void dev_applyMagneticField(uchar4* screen, Particle* dev_charges, fl
 		particle.y >= 0
 	) {
 		uchar4& pixel = screen[(int)particle.x + (int)particle.y * WINDOW_WIDTH];
-		//pixel.y = 255;
+		pixel.y = 150;
 	}
 }
 
@@ -148,8 +182,7 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges) {
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 	if (x >= WINDOW_WIDTH || y >= WINDOW_HEIGHT) return;
 
-	float2 force;
-	force.x = force.y = 0.0f;
+	float2 force = { 0, 0 };
 
 	float E = 0;
 	float2 t_force;
@@ -175,19 +208,18 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges) {
 	force.x *= K;
 	force.y *= K;
 
-	// set color on current pixel
 	uchar4& pixel = screen[x + y * WINDOW_WIDTH];
-	//pixel.x = pixel.y = pixel.z = 0;
+	//pixel.x = pixel.z = 0;
 	pixel.w = 255;
 
 	float l = length(force); // 
-	if (l < 0.2) return;
+	if (l < 70) return;
 
-	float maxL = 1.0;
+	int maxL = 255;
 	if (E > 0.0) {
-		pixel.x = l > maxL ? 255 : l/maxL * 255;
+		pixel.x = l;
 	} else {
-		pixel.z = l > maxL ? 255 : l/maxL * 255 ;
+		pixel.z = l;
 	}
 }
 
@@ -208,10 +240,12 @@ void idle(void) {
 	HANDLE_ERROR(cudaEventCreate(&stopEvent));
 	HANDLE_ERROR(cudaEventRecord(startEvent, 0));
 
-	// Compute Image
+	float elapsedTimeS = elapsedTime / 1000.0;
+	//float elapsedTimeS = 1 / 1000.0;
+	float dtau = elapsedTimeS * C / lambda;
 	dev_applyMagneticField<<<1, MAX_CHARGE_COUNT>>>(
 		dev_screen, dev_charges, 
-		elapsedTime / 1000.0 * C / lambda
+		dtau * TIME_SCALE
 	);
 	dev_renderFrame<<<blocks, threads>>>(dev_screen, dev_charges);
 	HANDLE_ERROR(cudaDeviceSynchronize());
@@ -234,7 +268,6 @@ void draw(void) {
 	glClearColor(0.0, 0.0, 0.0, 1.0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	
-	// Draw electric field
 	glDrawPixels(WINDOW_WIDTH, WINDOW_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 
 	glColor4f(0.4f, 0.4f, 1.0f, 0.2f);
@@ -243,17 +276,31 @@ void draw(void) {
 		magneticField.z, magneticField.w
 	);
 
-	// draw selected point
-	glPointSize(3.0f);
-	glColor3f(0.0f, 1.0f, 1.0f);
-	glBegin(GL_POINTS);
-		glVertex2i(
-			charges[selectedChargeIndex].x, 
-			charges[selectedChargeIndex].y
-		);
-	glEnd();
-
 	glutSwapBuffers();
+}
+
+void clearScreen() {
+	for (int i = 0; i < chargeCount; i++) {
+		charges[i].isPhysical = false;
+	}
+	HANDLE_ERROR(
+		cudaMemcpy(dev_charges, charges, chargeCount * sizeof(Particle), cudaMemcpyHostToDevice)
+	);
+	chargeCount = 0;
+	HANDLE_ERROR(
+		cudaMemcpyToSymbol(dev_chargeCount, &chargeCount, sizeof(chargeCount))
+	);
+	uchar4* dev_screen;
+	size_t size;
+
+	HANDLE_ERROR(cudaGraphicsMapResources(1, &cuda_vbo_resource, 0));
+	HANDLE_ERROR(
+		cudaGraphicsResourceGetMappedPointer((void**)&dev_screen, &size, cuda_vbo_resource)
+	);
+	dev_clearFrame<<<blocks, threads>>>(dev_screen);
+	HANDLE_ERROR(cudaDeviceSynchronize());
+	HANDLE_ERROR(cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0));
+	glutPostRedisplay();
 }
 
 void addCharge(int x, int y) {
@@ -273,7 +320,8 @@ void addCharge(int x, int y) {
 	float scale = rand() / (float)RAND_MAX; /* [0, 1.0] */
 	float newCharge = MIN_CHARGE + (float)scale * (MAX_CHARGE - MIN_CHARGE);      /* [min, max] */
 
-	if (scale <= 0.5) {
+	float scale2 = rand() / (float)RAND_MAX; /* [0, 1.0] */
+	if (scale2 < 0.5) {
 		newCharge = -newCharge;
 	}
 	
@@ -282,9 +330,10 @@ void addCharge(int x, int y) {
 	charges[chargeCount - 1].x = x;
 	charges[chargeCount - 1].y = y;
 	charges[chargeCount - 1].charge = newCharge;
-	charges[chargeCount - 1].vx = V * vScale;
+	charges[chargeCount - 1].vx = V_MIN + vScale * (V_MAX - V_MIN);
 	charges[chargeCount - 1].vy = 0.0f;
-	charges[chargeCount - 1].mass = fabs(newCharge / 10e10);
+	//charges[chargeCount - 1].mass = fabs(newCharge / 10e10);
+	charges[chargeCount - 1].mass = 9e-31;
 	charges[chargeCount - 1].isPhysical = true;
 
 	printf(
@@ -302,117 +351,42 @@ void addCharge(int x, int y) {
 	);
 }
 
+void addCharges(int x, int y) {
+	clearScreen();
+	float disp = 40;
+	for (int i = 0; i < MAX_CHARGE_COUNT; i++) {
+		float dx = rand() / (float)RAND_MAX * disp;
+		float dy = rand() / (float)RAND_MAX * disp;
+		
+		addCharge(x + dx - disp/2, y + dy - disp / 2);
+	}
+}
+
 
 void onMouseEvent(int button, int state, int x, int y) {
 	if (button == GLUT_MIDDLE_BUTTON && state == GLUT_DOWN) {
-		chargeCount = 0;
-		HANDLE_ERROR(
-			cudaMemcpyToSymbol(dev_chargeCount, &chargeCount, sizeof(chargeCount))
-		);
-		uchar4* dev_screen;
-		size_t size;
-
-		HANDLE_ERROR(cudaGraphicsMapResources(1, &cuda_vbo_resource, 0));
-		HANDLE_ERROR(
-			cudaGraphicsResourceGetMappedPointer((void**)&dev_screen, &size, cuda_vbo_resource)
-		);
-		dev_clearFrame<<<blocks, threads >>>(dev_screen);
-		HANDLE_ERROR(cudaDeviceSynchronize());
-		HANDLE_ERROR(cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0));
-		glutPostRedisplay();
+		clearScreen();
 		return;
 	}
 	
-	if (button != GLUT_LEFT_BUTTON) return;
-
-	// Drag, start dragging
-	/*if (state == GLUT_DOWN && selectedChargeIndex != -1) {
-		isDragging = true;
-		printf(
-			"Drag particle #%d with charge %.2f... ", 
-			selectedChargeIndex, 
-			charges[selectedChargeIndex].charge
-		);
-		charges[selectedChargeIndex].isPhysical = false;
-		HANDLE_ERROR(cudaMemcpy(
-			dev_charges + selectedChargeIndex,
-			charges + selectedChargeIndex,
-			1 * sizeof(Particle),
-			cudaMemcpyHostToDevice
-		));
+	if (button == GLUT_RIGHT_BUTTON && state == GLUT_UP) {
+		addCharge(x, WINDOW_HEIGHT - y);
 		return;
-	}*/
-	
-	if (state == GLUT_UP) {
-		if (selectedChargeIndex != -1) { // Drop, stop dragging
-			isDragging = false;
-			charges[selectedChargeIndex].isPhysical = true;
-			HANDLE_ERROR(cudaMemcpy(
-				dev_charges + selectedChargeIndex,
-				charges + selectedChargeIndex,
-				1 * sizeof(Particle),
-				cudaMemcpyHostToDevice
-			));
-			printf("Drop\n");
-		} else {
-			addCharge(x, WINDOW_HEIGHT - y);
-		}
+	}
+
+	if (button == GLUT_LEFT_BUTTON && state == GLUT_UP) {
+		addCharges(x, WINDOW_HEIGHT - y);
+		return;
 	}
 }
 
 void onMouseMove(int x, int y) {
-	if (isDragging && selectedChargeIndex != -1) {
-		if (x >= WINDOW_WIDTH) {
-			charges[selectedChargeIndex].x = WINDOW_WIDTH - 1;
-		} else if (x < 0) {
-			charges[selectedChargeIndex].x = 0;
-		} else {
-			charges[selectedChargeIndex].x = x;
-		}
-
-		if (y >= WINDOW_HEIGHT) {
-			charges[selectedChargeIndex].y = 0;
-		} else if (y < 0) {
-			charges[selectedChargeIndex].y = WINDOW_HEIGHT - 1;
-		} else {
-			charges[selectedChargeIndex].y = WINDOW_HEIGHT - y;
-		}
-
-		HANDLE_ERROR(
-			cudaMemcpy(
-				dev_charges + selectedChargeIndex,
-				charges + selectedChargeIndex,
-				1 * sizeof(Particle),
-				cudaMemcpyHostToDevice
-		));
-	}
+	
 }
 
 // Detect selected charge
 void mouseTrack(int x, int y) {
-	if (isDragging) return;
-
-	HANDLE_ERROR(
-		cudaMemcpy(charges, dev_charges, chargeCount * sizeof(Particle), cudaMemcpyDeviceToHost)
-	);
-
-	for (int i = 0; i < chargeCount; i++) {
-		int dx = x - charges[i].x;
-		int dy = (WINDOW_HEIGHT - y) - charges[i].y;
-
-		if (charges[i].x >= 10 * WINDOW_WIDTH) return;
-		if (charges[i].x < -10 * WINDOW_WIDTH) return;
-		if (charges[i].y >= 10 * WINDOW_HEIGHT) return;
-		if (charges[i].y < -10 * WINDOW_HEIGHT) return;
-
-		if (dx * dx + dy * dy < DETECT_CHARGE_RANGE * DETECT_CHARGE_RANGE) {
-			selectedChargeIndex = i;
-			printf("#%d, x: %f, y: %f\n", selectedChargeIndex, charges[i].x, charges[i].y);
-			return;
-		}
-	}
-
-	selectedChargeIndex = -1;
+	
 }
 
 void initCuda(int deviceId) {
