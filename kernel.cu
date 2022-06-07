@@ -16,9 +16,10 @@ const GLint WINDOW_WIDTH = 820;
 const GLint WINDOW_HEIGHT = 640;
 const int4 magneticField = { WINDOW_WIDTH / 3, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
 
-__device__ const float starB = -1e-9; // Tsl
+__device__ const float starB = 1e-9; // Tsl
+__device__ const float starE = 1e-5; // V/m
 __device__ const float C = 3e8;      // m/s
-__device__ const float lambda = 1;// m
+__device__ const float lambda = 3;// m
 __device__ const int4 d_magneticField = { 
 	WINDOW_WIDTH/3, // x-start
 	-WINDOW_HEIGHT*10,              // y-start
@@ -27,17 +28,17 @@ __device__ const int4 d_magneticField = {
 };
 
 const float TIME_SCALE = 0.1;
-const float starV = 10000; // m/s
+const float starV = 30000; // m/s
 const float V_MIN = 0.5 * starV / C;
 const float V_MAX = starV / C;
 
 /* charge constants */
-__constant__ const float K = 5e21;
+__constant__ const float K = 2e21;
 __constant__ float MIN_DISTANCE = 1.0f; // not to divide by zero
 
 const float MAX_CHARGE = 1.6e-19;
 const float MIN_CHARGE = 0.3 * MAX_CHARGE;
-const char MAX_CHARGE_COUNT = 15;
+const char MAX_CHARGE_COUNT = 10;
 
 char chargeCount = 0;
 __constant__ char dev_chargeCount;
@@ -95,12 +96,13 @@ __device__ bool isInMagneticField(float x, float y) {
 
 __device__ inline float4 dF(const Particle& p) {
 	float B = starB * p.charge * lambda / (p.mass * C);
+	float E = starE * p.charge * lambda / (p.mass * C * C);
 
 	return {
 		p.vx,
 		p.vy,
 		B * p.vy,
-		-B * p.vx
+		E-B * p.vx
 	};
 }
 
@@ -160,7 +162,7 @@ __global__ void dev_applyMagneticField(uchar4* screen, Particle* dev_charges, fl
 		particle.y >= 0
 	) {
 		uchar4& pixel = screen[(int)particle.x + (int)particle.y * WINDOW_WIDTH];
-		pixel.y = 150;
+		//pixel.y = 150;
 	}
 }
 
@@ -215,11 +217,12 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges) {
 	float l = length(force); // 
 	if (l < 70) return;
 
+	float lScale = 2;
 	int maxL = 255;
 	if (E > 0.0) {
-		pixel.x = l;
+		pixel.x = l * lScale;
 	} else {
-		pixel.z = l;
+		pixel.z = l * lScale;
 	}
 }
 
