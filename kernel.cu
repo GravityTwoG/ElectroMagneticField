@@ -34,7 +34,7 @@ const float V_MIN = 0.3 * V_MAX;
 
 const float MAX_CHARGE = 1.6e-19;
 const float MIN_CHARGE = 0.3 * MAX_CHARGE;
-__constant__ const float K = 2e21;
+__constant__ const float K = 1.5e21;
 
 const int MAX_CHARGE_COUNT = 20;
 
@@ -100,7 +100,6 @@ __device__ inline float4 dF(const Particle& p) {
 	};
 }
 
-// apply Columbus Law
 __global__ void dev_applyMagneticField(
 	uchar4* screen, Particle* dev_charges, int* d_chargesCount, float dt
 ) {
@@ -178,9 +177,7 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges, int* d_ch
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 	if (x >= WINDOW_WIDTH || y >= WINDOW_HEIGHT) return;
 
-	float2 force = { 0, 0 };
 	float E = 0;
-	// iterate over all charges and compute resulted force vector
 	for (char i = 0; i < *d_chargesCount; i++) {
 		const Particle& particle = dev_charges[i];
 		float2 t_force = {
@@ -188,34 +185,23 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges, int* d_ch
 			y - particle.y  // dy
 		};
 
-		float lengthSquared = t_force.x*t_force.x + t_force.y*t_force.y + 1.0f;
-
-		//e = q / (x^2 + y^2)^(3/2)
-		float e = particle.charge / sqrtf(lengthSquared * lengthSquared * lengthSquared);
-		E += e;
-		t_force.x *= e;
-		t_force.y *= e;
-
-		force.x += t_force.x;
-		force.y += t_force.y;
+		float length2 = t_force.x*t_force.x + t_force.y*t_force.y + 1;
+		E += particle.charge / length2;
 	}
-
-	force.x *= K;
-	force.y *= K;
 
 	uchar4& pixel = screen[x + y * WINDOW_WIDTH];
 	pixel.y = 0;
 	pixel.w = 255;
 
-	float l = sqrtf(force.x * force.x + force.y * force.y); // 
-	//if (l < 70) return;
-
-	float lScale = 2;
-	int brightness = l * lScale;
+	int brightness = K * fabs(E);
 	if (E > 0.0) {
-		pixel.x = pixel.x > brightness ? pixel.x : brightness;
+		pixel.x = pixel.x > brightness 
+			? pixel.x 
+			: brightness;
 	} else {
-		pixel.z = pixel.z > brightness ? pixel.z : brightness;
+		pixel.z = pixel.z > brightness 
+			? pixel.z 
+			: brightness;
 	}
 }
 
