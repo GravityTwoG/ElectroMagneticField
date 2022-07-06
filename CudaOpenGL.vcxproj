@@ -19,7 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{484CD0EE-90AE-4B17-A3F4-462F03A3010A}</ProjectGuid>
+    <ProjectGuid>{C4CD0772-E3A0-391E-8163-99ABF413502B}</ProjectGuid>
     <RootNamespace>CudaOpenGL</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -68,7 +68,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>C:\dev\informatics\CudaOpenGL\glew-2.1.0\include;C:\dev\informatics\CudaOpenGL\freeglut\include;$(IncludePath)</IncludePath>
+    <IncludePath>F:\dev\informatics\CudaOpenGL\libs\glew-2.1.0\include;F:\dev\informatics\CudaOpenGL\libs\freeglut\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(LibraryPath)</LibraryPath>
     <SourcePath>$(SourcePath)</SourcePath>
     <ReferencePath>$(ReferencePath)</ReferencePath>
@@ -84,7 +84,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Console</SubSystem>
       <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;freeglut.lib;glew32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>C:\dev\informatics\CudaOpenGL\glew-2.1.0\lib\Release\x64;C:\dev\informatics\CudaOpenGL\freeglut\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>F:\dev\informatics\CudaOpenGL\libs\glew-2.1.0\lib\Release\x64;F:\dev\informatics\CudaOpenGL\libs\freeglut\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
