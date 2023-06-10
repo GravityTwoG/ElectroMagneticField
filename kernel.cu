@@ -16,27 +16,32 @@ const GLint WINDOW_WIDTH = 820;
 const GLint WINDOW_HEIGHT = 640;
 const int4 magneticField = { WINDOW_WIDTH / 3, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
 
-__device__ const float starB = 5e-6; // Tsl
-__device__ const float2 starE = { 0, 1e-1 }; // V/m
-__device__ const float lambda = 1e-3;// m
-__device__ const float C = 3e8;      // m/s
+__device__ const float dev_starB = 5e-6f; // Tsl
+__device__ const float2 dev_starE = { 0.0f, 1e-1f }; // V/m
+__device__ const float dev_lambda = 1e-3f;// m
+__device__ const float dev_C = 3e8f;      // Speed of light, m/s
+
+const float lambda = 1e-3f;
+const float C = 3e8f;
+
+// location of electromagnetic field
 __device__ const int4 dev_magneticField = { 
-	WINDOW_WIDTH/3, // x-start
-	-WINDOW_HEIGHT*10,              // y-start
+	WINDOW_WIDTH/3,    // x-start
+	-WINDOW_HEIGHT*10, // y-start
 	WINDOW_WIDTH*10,   // x-end
 	WINDOW_HEIGHT*10   // y-end
 };
 
-const float TIME_SCALE = 1e-4;
-const float starV = 5e4; // m/s
+const float TIME_SCALE = 1e-4f;
+const float starV = 5e4f; // m/s
 const float V_MAX = starV / C;
-const float V_MIN = 0.3 * V_MAX;
+const float V_MIN = 0.3f * V_MAX;
 
-const float MAX_CHARGE = 1.6e-19;
-const float MIN_CHARGE = 0.3 * MAX_CHARGE;
-__constant__ const float K = 1.5e21;
-
+const float MAX_CHARGE = 1.6e-19f;
+const float MIN_CHARGE = 0.3f * MAX_CHARGE;
+__constant__ const float K = 1.5e21f;
 const int MAX_CHARGE_COUNT = 20;
+
 
 struct Particle {
 	float x;
@@ -52,6 +57,8 @@ Particle charges[MAX_CHARGE_COUNT];
 Particle* dev_charges;
 int chargeCount = 0;
 __device__ int* dev_chargeCount;
+bool electricFieldEnabled = true;
+__device__ bool* dev_electricFieldEnabled;
 
 
 dim3 blocks, threads;
@@ -67,22 +74,30 @@ void deleteVBO(GLuint* vbo, cudaGraphicsResource* vbo_res);
 
 
 __device__ bool isInMagneticField(float x, float y) {
-	if (x < dev_magneticField.x) return false;
-	if (x > dev_magneticField.z) return false;
-	if (y < dev_magneticField.y) return false;
-	if (y > dev_magneticField.w) return false;
+	if (
+		x < dev_magneticField.x ||
+		x > dev_magneticField.z ||
+		y < dev_magneticField.y ||
+		y > dev_magneticField.w
+	) return false;
 
 	return true;
 }
 
-__device__ inline float4 dF(const Particle& p) {
+// differential equation
+__device__ inline float4 dF(const Particle& p, bool* d_electricFieldEnabled) {
 	if (isInMagneticField(p.x, p.y)) {
-		float k = p.charge * lambda / (p.mass * C);
-		float B = starB * k;
+		float k = p.charge * dev_lambda / (p.mass * dev_C);
+		float B = dev_starB * k;
 		float2 E = { 
-			starE.x * k / C, 
-			starE.y * k / C
+			dev_starE.x * k / dev_C, 
+			dev_starE.y * k / dev_C
 		};
+
+		if (!(*d_electricFieldEnabled)) {
+			E.x = 0;
+			E.y = 0;
+		}
 
 		return {
 			p.vx,
@@ -101,42 +116,36 @@ __device__ inline float4 dF(const Particle& p) {
 }
 
 __global__ void dev_applyMagneticField(
-	uchar4* screen, Particle* dev_charges, int* d_chargesCount, float dt
+	uchar4* screen, Particle* d_charges, 
+	int* d_chargesCount, bool* d_electricFieldEnabled, float dt
 ) {
 	int charge_i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (charge_i >= *d_chargesCount) return;
 
-	Particle& particle = dev_charges[charge_i];
+	Particle& particle = d_charges[charge_i];
 	if (!particle.isPhysical) return;
 
-	//float4 fi = dF(particle);
-	//particle.x += dt * fi.x; // x + dx
-	//particle.y += dt * fi.y; // y + dy
-	//if (isInMagneticField(particle.x, particle.y)) {
-	//	particle.vx += dt * fi.z;
-	//	particle.vy += dt * fi.w;
-	//}
-
+	// RK4 method for solving ODE
 	Particle p2 = particle;
-	float4 d1 = dF(p2);
+	float4 d1 = dF(p2, d_electricFieldEnabled);
 
 	p2.x = particle.x + dt * d1.x / 2;
 	p2.y = particle.y + dt * d1.y / 2;
 	p2.vx = particle.vx + dt * d1.z / 2;
 	p2.vy = particle.vy + dt * d1.w / 2;
-	float4 d2 = dF(p2);
+	float4 d2 = dF(p2, d_electricFieldEnabled);
 
 	p2.x = particle.x + dt * d2.x / 2;
 	p2.y = particle.y + dt * d2.y / 2;
 	p2.vx = particle.vx + dt * d2.z / 2;
 	p2.vy = particle.vy + dt * d2.w / 2;
-	float4 d3 = dF(p2);
+	float4 d3 = dF(p2, d_electricFieldEnabled);
 	
 	p2.x = particle.x + dt * d3.x;
 	p2.y = particle.y + dt * d3.y;
 	p2.vx = particle.vx + dt * d3.z;
 	p2.vy = particle.vy + dt * d3.w;
-	float4 d4 = dF(p2);
+	float4 d4 = dF(p2, d_electricFieldEnabled);
 
 	particle.x += dt / 6 * (d1.x + 2*d2.x + 2*d3.x + d4.x); // x + dx
 	particle.y += dt / 6 * (d1.y + 2*d2.y + 2*d3.y + d4.y); // y + dy
@@ -171,7 +180,7 @@ __global__ void dev_clearFrame(uchar4* screen) {
 	pixel.w = 255;
 }
 
-// Compute electric field
+// Compute electric field created by particles charges
 __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges, int* d_chargesCount) {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -208,12 +217,12 @@ __global__ void dev_renderFrame(uchar4* screen, Particle* dev_charges, int* d_ch
 float elapsedTime = 0.0f;
 
 void idle(void) {
-	uchar4* dev_screen;
+	uchar4* screen;
 	size_t size;
 
 	HANDLE_ERROR(cudaGraphicsMapResources(1, &cuda_vbo_resource, 0));
 	HANDLE_ERROR(
-		cudaGraphicsResourceGetMappedPointer((void**)&dev_screen, &size, cuda_vbo_resource)
+		cudaGraphicsResourceGetMappedPointer((void**)&screen, &size, cuda_vbo_resource)
 	);
 
 	cudaEvent_t startEvent, stopEvent;
@@ -222,11 +231,11 @@ void idle(void) {
 	HANDLE_ERROR(cudaEventRecord(startEvent, 0));
 
 	//float elapsedTimeS = elapsedTime / 1000.0;
-	float elapsedTimeS = 1 / 1000.0;
+	float elapsedTimeS = 1 / 1000.0f;
 	float dtau = elapsedTimeS * C / lambda;
-	dev_renderFrame<<<blocks, threads>>>(dev_screen, dev_charges, dev_chargeCount);
+	dev_renderFrame<<<blocks, threads>>>(screen, dev_charges, dev_chargeCount);
 	dev_applyMagneticField<<<1, MAX_CHARGE_COUNT>>>(
-		dev_screen, dev_charges, dev_chargeCount,
+		screen, dev_charges, dev_chargeCount, dev_electricFieldEnabled,
 		dtau * TIME_SCALE
 	);
 	HANDLE_ERROR(cudaDeviceSynchronize());
@@ -264,15 +273,15 @@ void clearScreen() {
 	HANDLE_ERROR(
 		cudaMemcpy(dev_chargeCount, &chargeCount, sizeof(chargeCount), cudaMemcpyHostToDevice)
 	);
-	uchar4* dev_screen;
+	uchar4* screen;
 	size_t size;
 
 	HANDLE_ERROR(cudaGraphicsMapResources(1, &cuda_vbo_resource, 0));
 	
 	HANDLE_ERROR(
-		cudaGraphicsResourceGetMappedPointer((void**)&dev_screen, &size, cuda_vbo_resource)
+		cudaGraphicsResourceGetMappedPointer((void**)&screen, &size, cuda_vbo_resource)
 	);
-	dev_clearFrame<<<blocks, threads>>>(dev_screen);
+	dev_clearFrame<<<blocks, threads>>>(screen);
 	HANDLE_ERROR(cudaDeviceSynchronize());
 	
 	HANDLE_ERROR(cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0));
@@ -298,12 +307,12 @@ void addCharge(int x, int y) {
 	
 	float vScale = rand() / (float)RAND_MAX; /* [0, 1.0] */
 
-	charges[chargeCount - 1].x = x;
-	charges[chargeCount - 1].y = y;
+	charges[chargeCount - 1].x = (float)x;
+	charges[chargeCount - 1].y = (float)y;
 	charges[chargeCount - 1].charge = newCharge;
 	charges[chargeCount - 1].vx = V_MIN + vScale * (V_MAX - V_MIN);
 	charges[chargeCount - 1].vy = 0.0f;
-	charges[chargeCount - 1].mass = 9.11e-31;
+	charges[chargeCount - 1].mass = 9.11e-31f;
 	charges[chargeCount - 1].isPhysical = true;
 }
 
@@ -317,7 +326,7 @@ void addCharges(int x, int y, int n) {
 		float dx = rand() / (float)RAND_MAX * disp;
 		float dy = rand() / (float)RAND_MAX * disp;
 		
-		addCharge(x + dx - disp/2, y + dy - disp / 2);
+		addCharge(int(x + dx - disp/2), int(y + dy - disp / 2));
 		printf("Charges %d\n", chargeCount);
 	}
 
@@ -329,6 +338,24 @@ void addCharges(int x, int y, int n) {
 	);
 }
 
+void toggleElectricField() {
+	electricFieldEnabled = !electricFieldEnabled;
+	if (electricFieldEnabled) {
+		printf("Electric Field is enabled.\n");
+	} else {
+		printf("Electric Field is disabled.\n");
+	}
+	HANDLE_ERROR(
+		cudaMemcpy(dev_electricFieldEnabled, &electricFieldEnabled, 
+		sizeof(electricFieldEnabled), cudaMemcpyHostToDevice)
+	);
+}
+
+void onKeyboardEvent(unsigned char key, int x, int y) {
+	if (key == 'E' || key == 'e') {
+		toggleElectricField();
+	}
+}
 
 void onMouseEvent(int button, int state, int x, int y) {
 	if (button == GLUT_MIDDLE_BUTTON && state == GLUT_DOWN) {
@@ -361,11 +388,12 @@ void initGlut(int argc, char** argv) {
 	int posX = glutGet(GLUT_SCREEN_WIDTH) / 2 - WINDOW_WIDTH / 2;
 	int posY = glutGet(GLUT_SCREEN_HEIGHT) / 2 - WINDOW_HEIGHT / 2;
 	glutInitWindowPosition(posX, posY);
-	glutCreateWindow("Lab-4");
+	glutCreateWindow("Electro-magnetic fiels sim");
 
 	glutIdleFunc(idle);
 	glutDisplayFunc(draw);
 	glutMouseFunc(onMouseEvent);
+	glutKeyboardFunc(onKeyboardEvent);
 	glutReshapeFunc(onResize);
 
 	glMatrixMode(GL_PROJECTION);
@@ -380,7 +408,7 @@ void initGlut(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-	srand(time(0));
+	srand((unsigned int)time(0));
 	initGlut(argc, argv);
 
 	cudaDeviceProp properties;
@@ -393,8 +421,15 @@ int main(int argc, char** argv) {
 	blocks.y = (WINDOW_HEIGHT + threads.y) / threads.y;
 	cudaMalloc((void**)&dev_charges, sizeof(Particle) * MAX_CHARGE_COUNT);
 	cudaMalloc((void**)&dev_chargeCount, sizeof(chargeCount));
+	cudaMalloc((void**)&dev_electricFieldEnabled, sizeof(electricFieldEnabled));
 	HANDLE_ERROR(
-		cudaMemcpy(dev_chargeCount, &chargeCount, sizeof(chargeCount), cudaMemcpyHostToDevice)
+		cudaMemcpy(dev_chargeCount, &chargeCount, 
+		sizeof(chargeCount), cudaMemcpyHostToDevice)
+	);
+	HANDLE_ERROR(
+		cudaMemcpy(
+			dev_electricFieldEnabled, &electricFieldEnabled, 
+			sizeof(electricFieldEnabled), cudaMemcpyHostToDevice)
 	);
 	createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
 
